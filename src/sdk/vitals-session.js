@@ -16,6 +16,7 @@ import {
     ProcessingStatus,
     ValidationCode,
     SmartSpectraErrorCode,
+    MetricType,
     breathingMetrics,
     cardioMetrics,
 } from '@smartspectra/node-sdk/renderer';
@@ -51,6 +52,15 @@ const ERROR_LABELS = Object.freeze(
     ),
 );
 
+/** MetricType code -> SDK export name, e.g. 2 -> BREATHING_RATE. */
+export const METRIC_NAMES = Object.freeze(
+    Object.fromEntries(
+        Object.entries(MetricType)
+            .filter(([, value]) => typeof value === 'number')
+            .map(([key, value]) => [value, key]),
+    ),
+);
+
 export function statusLabel(status) {
     return STATUS_LABELS[status] || `Status(${status})`;
 }
@@ -61,6 +71,69 @@ export function validationLabel(code) {
 
 export function errorLabel(code) {
     return ERROR_LABELS[code] || String(code);
+}
+
+/**
+ * Build the requestedMetrics array from the installed SDK's own bundles and
+ * drop only codes that this SDK version does not define. Codes are compared
+ * against MetricType from the installed package, never a hand-written list.
+ */
+export function resolveRequestedMetrics({ cardio = true } = {}) {
+    const requested = [...breathingMetrics, ...(cardio ? cardioMetrics : [])];
+    const unsupported = requested.filter((code) => !(code in METRIC_NAMES));
+    const codes = requested.filter((code) => code in METRIC_NAMES);
+    return {
+        codes,
+        names: codes.map((code) => `${METRIC_NAMES[code]}(${code})`),
+        unsupported,
+        cardio,
+    };
+}
+
+/**
+ * Classify a native SDK failure so the UI can distinguish:
+ *   authentication        -> key rejected (kAuthenticationFailed, or auth text)
+ *   metric-authorization  -> key accepted but metrics not entitled / gated
+ *   model-provisioning    -> device-key or encrypted-model delivery failed
+ *   invalid-configuration -> ConfigurationFailed without a more specific hint
+ * The native message is matched only for wording; the numeric code wins where
+ * the SDK defines one.
+ */
+export function classifyFailure(code, message) {
+    const text = String(message || '').toLowerCase();
+
+    if (code === SmartSpectraErrorCode.kAuthenticationFailed) return 'authentication';
+    if (/api[_ ]?key|authenticat|credential|usage verification|unauthori[sz]ed.*key/.test(text)) {
+        return 'authentication';
+    }
+    if (
+        /metric(s)? (authoriz|authoris)|authoriz(ation|ed).*metric|metric.*(unauthoriz|not entitled|entitlement)|gating|subscription/.test(
+            text,
+        )
+    ) {
+        return 'metric-authorization';
+    }
+    if (/device[_ ]?key|device\/pair|device pair|secure_model|model_id|model load|emd/.test(text)) {
+        return 'model-provisioning';
+    }
+    if (code === SmartSpectraErrorCode.kConfigurationFailed) return 'invalid-configuration';
+    if (code === SmartSpectraErrorCode.kCreditExhausted) return 'credit-exhausted';
+    if (code === SmartSpectraErrorCode.kNetworkError) return 'network';
+    if (code === SmartSpectraErrorCode.kProcessingFailed) return 'processing';
+    return 'unknown';
+}
+
+function normalizeFailure(error, source) {
+    const code = error && error.code != null ? error.code : 'JS';
+    const message = error && error.message ? error.message : String(error);
+    return {
+        code,
+        label: typeof code === 'number' ? errorLabel(code) : String(code),
+        message,
+        retryable: Boolean(error && error.retryable),
+        kind: typeof code === 'number' ? classifyFailure(code, message) : 'unknown',
+        source,
+    };
 }
 
 /** protobuf Long | number -> number microseconds. */
@@ -144,19 +217,26 @@ export function summarizeMetrics(metrics) {
  * Thin, dependency-free event emitter around the official renderer SDK.
  *
  * Events:
+ *   'metricsRequest'   { codes, names, unsupported, cardio }
  *   'stream'           MediaStream
  *   'processingStatus' { status, label }
  *   'validation'       { code, label, hint, timestampUs }
  *   'metrics'          { snapshot, packetIndex, receivedAt }
  *   'decodeError'      { error, packetIndex }
- *   'error'            { code, label, message, retryable, source }
+ *   'fallback'         { failure, from } — cardio configuration failed, retrying breathing-only
+ *   'error'            { code, label, message, retryable, kind, source }
  */
 export class VitalsSession {
-    constructor({ apiKey } = {}) {
+    constructor({ apiKey, cardio = true } = {}) {
         this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
         this._listeners = new Map();
         this._sdk = null;
         this._packetIndex = 0;
+        this._cardioRequested = Boolean(cardio);
+        this._fallbackActive = false;
+        this._hostStream = null;
+        this._cameraRetryUsed = false;
+        this._requested = resolveRequestedMetrics({ cardio: this._cardioRequested });
     }
 
     get hasApiKey() {
@@ -165,6 +245,14 @@ export class VitalsSession {
 
     get metricsCount() {
         return this._packetIndex;
+    }
+
+    get requestedMetrics() {
+        return this._requested;
+    }
+
+    get fallbackActive() {
+        return this._fallbackActive;
     }
 
     on(event, handler) {
@@ -189,9 +277,15 @@ export class VitalsSession {
     _ensureSdk() {
         if (this._sdk) return this._sdk;
 
+        this._requested = resolveRequestedMetrics({
+            cardio: this._cardioRequested && !this._fallbackActive,
+        });
+        this._emit('metricsRequest', this._requested);
+
         const sdk = new SmartSpectraSDK({
             apiKey: this.apiKey,
-            requestedMetrics: [...breathingMetrics, ...cardioMetrics],
+            // Only codes validated against this SDK's MetricType are sent.
+            requestedMetrics: this._requested.codes,
         });
 
         sdk.on('streamAvailable', (stream) => {
@@ -235,6 +329,7 @@ export class VitalsSession {
                 label: errorLabel(code),
                 message,
                 retryable,
+                kind: classifyFailure(code, message),
                 source: 'sdk',
             });
         });
@@ -243,7 +338,98 @@ export class VitalsSession {
         return sdk;
     }
 
-    /** Acquire the camera and begin streaming to Presage. */
+    _destroySdk() {
+        this._releaseHostStream();
+        if (!this._sdk) return;
+        try {
+            this._sdk.destroy();
+        } catch (error) {
+            console.error('[tempo] SDK destroy failed:', error);
+        }
+        this._sdk = null;
+    }
+
+    _releaseHostStream() {
+        if (!this._hostStream) return;
+        for (const track of this._hostStream.getTracks()) {
+            try {
+                track.stop();
+            } catch {
+                // already stopped
+            }
+        }
+        this._hostStream = null;
+    }
+
+    /**
+     * Host-side camera acquisition used only if the SDK's default getUserMedia
+     * times out. The SDK's default constraints include `facingMode: 'user'`;
+     * Windows desktop cameras do not reliably honour facing-mode selection, so
+     * the retry uses plain ideal width/height/fps with no facingMode — still
+     * the official renderer path, via useMediaStream().
+     */
+    async _acquireHostStream() {
+        const constraints = {
+            audio: false,
+            video: {
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+                frameRate: { ideal: 30 },
+            },
+        };
+
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cameras = devices
+                .filter((device) => device.kind === 'videoinput')
+                .map((device, index) => ({
+                    index,
+                    label: device.label || '(label hidden until camera permission is granted)',
+                    deviceIdSuffix: device.deviceId ? device.deviceId.slice(-6) : '(none)',
+                }));
+            this._emit('cameraDevices', { cameras, constraints });
+        } catch (error) {
+            this._emit('cameraDevices', { cameras: [], constraints, error: error.message });
+        }
+
+        try {
+            return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (error) {
+            const name = error && error.name ? error.name : 'Error';
+            const hint =
+                name === 'NotAllowedError'
+                    ? 'Camera permission was denied. Allow camera access for desktop apps in Windows Settings → Privacy → Camera, then retry.'
+                    : name === 'NotReadableError'
+                        ? 'The camera is already in use by another application. Close Teams/Zoom/Camera/other Electron apps and retry.'
+                        : name === 'AbortError'
+                            ? 'The camera did not start in time. Close other camera apps, check Windows Settings → Privacy → Camera, and retry. A USB camera can also be re-plugged.'
+                            : name === 'NotFoundError'
+                                ? 'No camera was found. Connect a webcam and retry.'
+                                : 'The camera could not be opened.';
+            const wrapped = new Error(
+                `Host camera acquisition failed (${name}): ${error && error.message ? error.message : error}. ${hint}`,
+            );
+            wrapped.code = 'TEMPO_CAMERA';
+            throw wrapped;
+        }
+    }
+
+    _shouldRetryCamera(failure) {
+        if (this._cameraRetryUsed || this._hostStream) return false;
+        return /AbortError|Timeout starting video source|NotReadableError|Could not start video source/.test(
+            failure.message,
+        );
+    }
+
+    /**
+     * Acquire the camera and begin streaming to Presage.
+     *
+     * If the full breathing+cardio request fails with ConfigurationFailed, the
+     * official sample's documented cardio failure mode (device keys / metric
+     * authorization) is a likely cause. We retry once with breathing only so a
+     * partially entitled key can still produce real measurements; the original
+     * native error is emitted through 'fallback' and shown in the UI.
+     */
     async start() {
         if (!this.hasApiKey) {
             const error = new Error(
@@ -253,53 +439,115 @@ export class VitalsSession {
             throw error;
         }
 
-        // Construction is deferred so a missing key never reaches the native SDK.
+        // One host-stream retry is allowed per start attempt.
+        this._cameraRetryUsed = false;
+
         const sdk = this._ensureSdk();
         try {
             await sdk.start();
+            return;
         } catch (error) {
-            this._emit('error', {
-                code: error && error.code != null ? error.code : 'JS',
-                label: error && error.code != null ? errorLabel(error.code) : 'JavaScriptError',
-                message: error && error.message ? error.message : String(error),
-                retryable: Boolean(error && error.retryable),
-                source: 'start',
-            });
+            const failure = normalizeFailure(error, 'start');
+
+            if (this._shouldRetryCamera(failure)) {
+                this._cameraRetryUsed = true;
+                this._emit('cameraRetry', { failure });
+                try {
+                    const stream = await this._acquireHostStream();
+                    this._hostStream = stream;
+                    // The SDK does not emit streamAvailable for host-supplied
+                    // streams, so surface the preview stream ourselves.
+                    this._emit('stream', stream);
+                    sdk.useMediaStream(stream);
+                    await sdk.start();
+                    return;
+                } catch (retryError) {
+                    this._releaseHostStream();
+                    if (retryError && retryError.code === 'TEMPO_CAMERA') {
+                        const cameraFailure = {
+                            code: 'CAMERA',
+                            label: 'CameraUnavailable',
+                            message: retryError.message,
+                            retryable: true,
+                            kind: 'camera',
+                            source: 'camera retry',
+                        };
+                        retryError.failure = cameraFailure;
+                        this._emit('error', cameraFailure);
+                        throw retryError;
+                    }
+                    const retryFailure = normalizeFailure(retryError, 'camera retry');
+                    this._emit('error', retryFailure);
+                    throw retryError;
+                }
+            }
+
+            const canFallback =
+                !this._fallbackActive &&
+                this._cardioRequested &&
+                failure.code === SmartSpectraErrorCode.kConfigurationFailed;
+
+            if (canFallback) {
+                this._emit('fallback', { failure, from: this._requested });
+                this._fallbackActive = true;
+                // A failed renderer start already released the SDK-owned camera.
+                // Rebuild the SDK so the new metric set is used for configure.
+                this._destroySdk();
+                // Native SDK state is process-global and main-process teardown
+                // is deferred; give the destroy message a moment to be handled
+                // so the replacement start queues behind its teardown barrier.
+                await new Promise((resolve) => setTimeout(resolve, 250));
+                try {
+                    await this._ensureSdk().start();
+                    return;
+                } catch (retryError) {
+                    const retryFailure = normalizeFailure(retryError, 'start (breathing-only retry)');
+                    this._emit('error', retryFailure);
+                    throw retryError;
+                }
+            }
+
+            this._emit('error', failure);
             throw error;
         }
     }
 
     /** Stop the session and release the SDK-acquired camera. */
     async stop() {
-        if (!this._sdk) return;
+        if (!this._sdk) {
+            this._releaseHostStream();
+            return;
+        }
         try {
             await this._sdk.stop();
         } catch (error) {
-            this._emit('error', {
-                code: error && error.code != null ? error.code : 'JS',
-                label: error && error.code != null ? errorLabel(error.code) : 'JavaScriptError',
-                message: error && error.message ? error.message : String(error),
-                retryable: Boolean(error && error.retryable),
-                source: 'stop',
-            });
+            this._emit('error', normalizeFailure(error, 'stop'));
             throw error;
+        } finally {
+            this._releaseHostStream();
         }
     }
 
-    /** Rebuild the pipeline after an SDK error. */
+    /**
+     * Rebuild after an error. A fallback session is torn down completely so the
+     * next start retries the full metric bundle; otherwise use the SDK's reset.
+     */
     async reset() {
-        if (!this._sdk) return;
+        if (!this._sdk) {
+            this._releaseHostStream();
+            return;
+        }
+        if (this._fallbackActive || this._hostStream) {
+            this._destroySdk();
+            this._fallbackActive = false;
+            this._cameraRetryUsed = false;
+            return;
+        }
         await this._sdk.reset();
     }
 
     /** Release renderer + main-process resources. Idempotent. */
     destroy() {
-        if (!this._sdk) return;
-        try {
-            this._sdk.destroy();
-        } catch (error) {
-            console.error('[tempo] SDK destroy failed:', error);
-        }
-        this._sdk = null;
+        this._destroySdk();
     }
 }

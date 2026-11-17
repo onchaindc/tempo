@@ -14,6 +14,7 @@ import {
 
 // Injected by scripts/build-renderer.mjs from the local environment.
 const API_KEY = __SMARTSPECTRA_API_KEY__;
+const CARDIO_DISABLED = __TEMPO_DISABLE_CARDIO__;
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,6 +24,8 @@ const els = {
     errorBanner: $('error-banner'),
     errorCode: $('error-code'),
     errorMessage: $('error-message'),
+    fallbackBanner: $('fallback-banner'),
+    fallbackMessage: $('fallback-message'),
     preview: $('preview'),
     previewPlaceholder: $('preview-placeholder'),
     previewState: $('preview-state'),
@@ -31,19 +34,27 @@ const els = {
     btnStop: $('btn-stop'),
     btnReset: $('btn-reset'),
     btnClearLog: $('btn-clear-log'),
+    btnCopyFailure: $('btn-copy-failure'),
     sdkVersion: $('sdk-version'),
     statPackets: $('stat-packets'),
     statLast: $('stat-last'),
+    statMetrics: $('stat-metrics'),
     cardioNote: $('cardio-note'),
+    failurePanel: $('failure-panel'),
+    failureDetail: $('failure-detail'),
     log: $('event-log'),
 };
 
-const session = new VitalsSession({ apiKey: API_KEY });
+const session = new VitalsSession({
+    apiKey: API_KEY,
+    cardio: !CARDIO_DISABLED,
+});
 
 let packetCount = 0;
 let packetsWithCardio = 0;
 let running = false;
 let lastStatus = ProcessingStatus.kUninitialized;
+let lastFailureText = '';
 
 els.sdkVersion.textContent = SDK_VERSION;
 
@@ -135,22 +146,60 @@ function clearMetrics() {
 
 // --- Camera / status -------------------------------------------------------
 
+let previewTrack = null;
+
+function onPreviewTrackEnded() {
+    log('camera track ended — the SDK released the stream', 'warn');
+    clearPreview('camera released');
+}
+
+function detachPreviewTrack() {
+    if (!previewTrack) return;
+    previewTrack.removeEventListener('ended', onPreviewTrackEnded);
+    previewTrack = null;
+}
+
 function showPreview(stream) {
+    detachPreviewTrack();
     els.preview.srcObject = stream;
     els.previewPlaceholder.hidden = true;
-    els.previewState.textContent = 'live';
-    els.preview.play().catch((error) => {
-        log(`preview play() rejected: ${error.message}`, 'warn');
-    });
+    els.previewState.textContent = 'acquiring';
+
+    els.preview.onloadedmetadata = () => {
+        const { videoWidth: width, videoHeight: height } = els.preview;
+        log(`preview metadata ${width || '?'}x${height || '?'}`, 'ok');
+        els.previewState.textContent = width && height ? `live ${width}x${height}` : 'live';
+    };
+    els.preview.onplaying = () => log('preview playing');
+    els.preview.onerror = () => log('preview element reported a media error', 'error');
+
     const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    previewTrack = track || null;
+    if (previewTrack) previewTrack.addEventListener('ended', onPreviewTrackEnded);
+
     const settings = track && track.getSettings ? track.getSettings() : {};
     log(
         `stream acquired (${settings.width || '?'}x${settings.height || '?'} @ ${settings.frameRate || '?'} fps)`,
         'ok',
     );
+
+    // Autoplay policy in Electron doesn't always honor <video autoplay> when
+    // srcObject is assigned after load; start playback explicitly.
+    els.preview.play().then(() => {
+        if (els.preview.videoWidth && els.preview.videoHeight) {
+            els.previewState.textContent = `live ${els.preview.videoWidth}x${els.preview.videoHeight}`;
+        }
+    }).catch((error) => {
+        els.previewState.textContent = 'paused';
+        log(`preview play() rejected: ${error.message}`, 'warn');
+    });
 }
 
 function clearPreview(reason) {
+    detachPreviewTrack();
+    els.preview.onloadedmetadata = null;
+    els.preview.onplaying = null;
+    els.preview.onerror = null;
     els.preview.srcObject = null;
     els.previewPlaceholder.hidden = false;
     els.previewState.textContent = reason;
@@ -174,16 +223,87 @@ function setStatus(status) {
     lastStatus = status.status;
     updateButtons(status.status);
     log(`processingStatus -> ${status.label} (${status.status})`);
+
+    if (status.status === ProcessingStatus.kError) {
+        // The renderer SDK releases its camera when start fails; without this
+        // the panel kept saying "live" over a stopped (black) stream.
+        clearPreview('released after SDK error');
+    }
 }
 
-function showError({ code, label, message, retryable, source }) {
-    els.errorBanner.hidden = false;
-    els.errorCode.textContent = `${label} (${code})`;
-    els.errorMessage.textContent = `${message}${retryable ? ' — retryable' : ''}`;
-    log(`error [${source}] ${label} (${code}): ${message}${retryable ? ' [retryable]' : ''}`, 'error');
+// --- Failure surfaces ------------------------------------------------------
+
+const FAILURE_KIND_TEXT = {
+    authentication: 'Authentication failure — the API key was rejected.',
+    'metric-authorization':
+        'Metric authorization failure — the key authenticated, but it is not entitled to one or more requested metrics.',
+    'model-provisioning':
+        'Model/device-key provisioning failure — an encrypted cardio model (for example arterial pressure) could not be loaded.',
+    'invalid-configuration':
+        'Invalid configuration — native ConfigurationFailed without a more specific metric or auth hint in the message.',
+    'credit-exhausted': 'Credit exhausted — the Presage account has no measurement credit left.',
+    network: 'Network failure — the SDK could not reach the Presage service.',
+    processing: 'Processing failure after the session started.',
+    camera: 'Camera acquisition failure — the OS or another app prevented the camera from starting.',
+    unknown: 'Unclassified SDK failure.',
+};
+
+function buildFailureDetail(failure) {
+    const requested = session.requestedMetrics;
+    return [
+        `code: ${failure.label} (${failure.code})`,
+        `kind: ${failure.kind}`,
+        `source: ${failure.source}`,
+        `retryable: ${failure.retryable}`,
+        `requestedMetrics: ${requested.names.join(', ') || '(none)'}`,
+        `cardioRequested: ${!CARDIO_DISABLED}`,
+        `fallbackActive: ${session.fallbackActive}`,
+        `apiKey: ${session.hasApiKey ? 'present' : 'missing'}`,
+        '',
+        'message:',
+        failure.message,
+    ].join('\n');
 }
+
+function recordFailureDetail(failure) {
+    lastFailureText = buildFailureDetail(failure);
+    els.failurePanel.hidden = false;
+    els.failureDetail.textContent = lastFailureText;
+}
+
+function showFailure(failure, { releasePreview = true } = {}) {
+    const kindText = FAILURE_KIND_TEXT[failure.kind] || FAILURE_KIND_TEXT.unknown;
+    recordFailureDetail(failure);
+
+    els.errorBanner.hidden = false;
+    els.errorCode.textContent = `${failure.label} (${failure.code})`;
+    els.errorMessage.textContent = `${kindText} ${failure.message}`;
+
+    log(`error [${failure.source}] ${failure.label} (${failure.code}, ${failure.kind}): ${failure.message}`, 'error');
+    console.error('[tempo] SDK failure', failure);
+
+    if (releasePreview) clearPreview('released after SDK error');
+}
+
+els.btnCopyFailure.addEventListener('click', async () => {
+    if (!lastFailureText) return;
+    try {
+        await navigator.clipboard.writeText(lastFailureText);
+        log('failure details copied to clipboard');
+    } catch (error) {
+        log(`copy failed: ${error.message}`, 'warn');
+    }
+});
 
 // --- SDK events ------------------------------------------------------------
+
+session.on('metricsRequest', ({ names, unsupported, cardio }) => {
+    els.statMetrics.textContent = names.join(', ') || '(none)';
+    log(`requestedMetrics (${names.length}${cardio ? ', breathing+cardio' : ', breathing only'}): ${names.join(', ')}`);
+    if (unsupported.length > 0) {
+        log(`dropped metric codes missing from this SDK: ${unsupported.join(', ')}`, 'warn');
+    }
+});
 
 session.on('stream', showPreview);
 session.on('processingStatus', setStatus);
@@ -227,16 +347,50 @@ session.on('metrics', ({ snapshot, packetIndex, receivedAt }) => {
 });
 
 session.on('decodeError', ({ error, packetIndex }) => {
-    showError({
+    showFailure({
         code: 'DECODE',
         label: 'decodeMetricsFailed',
         message: `packet #${packetIndex}: ${error.message}`,
         retryable: false,
+        kind: 'unknown',
         source: 'decode',
-    });
+    }, { releasePreview: false });
 });
 
-session.on('error', showError);
+session.on('cameraRetry', ({ failure }) => {
+    log(
+        `default camera acquisition failed (${failure.message}); retrying with a host MediaStream ` +
+        'without facingMode (Windows-safe)',
+        'warn',
+    );
+});
+
+session.on('cameraDevices', ({ cameras, constraints, error }) => {
+    if (error) {
+        log(`could not enumerate video devices: ${error}`, 'warn');
+        return;
+    }
+    log(`video inputs (${cameras.length}): ${cameras.map((c) => c.label).join(' | ') || '(none reported)'}`);
+    log(`host camera constraints: ${JSON.stringify(constraints.video)}`);
+});
+
+session.on('fallback', ({ failure }) => {
+    // Keep the original ConfigurationFailed details copyable even though the
+    // session is recovering with breathing only.
+    recordFailureDetail(failure);
+    els.fallbackBanner.hidden = false;
+    els.fallbackMessage.textContent =
+        `${failure.label} (${failure.code}) while requesting cardio. Retrying with breathing metrics only. ` +
+        `Native detail: ${failure.message}`;
+    clearPreview('restarting camera');
+    log(
+        `configuration failed with cardio (${failure.label} ${failure.code}); retrying breathing-only. ` +
+        `Native detail: ${failure.message}`,
+        'warn',
+    );
+});
+
+session.on('error', (failure) => showFailure(failure));
 
 // --- Controls --------------------------------------------------------------
 
@@ -248,6 +402,7 @@ async function startMeasurement() {
 
     els.errorBanner.hidden = true;
     els.setupBanner.hidden = true;
+    els.fallbackBanner.hidden = true;
     packetCount = 0;
     packetsWithCardio = 0;
     els.statPackets.textContent = '0';
@@ -262,9 +417,14 @@ async function startMeasurement() {
         // The session emits a structured 'error' event for SDK failures;
         // this is a fallback for failures that never reached the SDK.
         if (els.errorBanner.hidden) {
-            els.errorBanner.hidden = false;
-            els.errorCode.textContent = error.code || 'START';
-            els.errorMessage.textContent = error.message;
+            showFailure({
+                code: error.code || 'START',
+                label: String(error.code || 'START'),
+                message: error.message,
+                retryable: false,
+                kind: 'unknown',
+                source: 'start',
+            });
         }
         log(`start() failed: ${error.message}`, 'error');
         updateButtons(lastStatus);
@@ -292,6 +452,7 @@ async function resetSession() {
         log(`reset() failed: ${error.message}`, 'error');
     }
     els.errorBanner.hidden = true;
+    els.fallbackBanner.hidden = true;
     clearPreview('released');
     clearMetrics();
 }
@@ -302,17 +463,23 @@ els.btnReset.addEventListener('click', resetSession);
 
 // --- Boot ------------------------------------------------------------------
 
+log(`API key: ${session.hasApiKey ? 'present' : 'MISSING'}`);
+if (CARDIO_DISABLED) {
+    log('TEMPO_DISABLE_CARDIO=1 — cardio bundle is disabled for this run', 'warn');
+}
+
 if (!session.hasApiKey) {
     els.setupBanner.hidden = false;
     els.btnStart.disabled = true;
     els.btnStart.title = 'SMARTSPECTRA_API_KEY is not set';
     log('SMARTSPECTRA_API_KEY missing — measurement disabled', 'error');
 } else {
-    log(`ready — SDK ${SDK_VERSION}, requesting breathing + cardio`);
+    log(`ready — SDK ${SDK_VERSION}`);
 }
 
 updateButtons(ProcessingStatus.kUninitialized);
 clearMetrics();
+els.statMetrics.textContent = session.requestedMetrics.names.join(', ');
 
 // Release the renderer SDK bridge and the main-process SDK before teardown.
 window.addEventListener('beforeunload', () => {

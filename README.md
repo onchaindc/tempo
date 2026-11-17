@@ -77,7 +77,17 @@ Flow:
 5. Breathing and cardio cards move from **unavailable** to **warming-up** to
    **valid** as real decoded samples with `stable: true` arrive.
 
-`TEMPO_DIAGNOSTICS=1` opens DevTools and shows the SDK's IPC diagnostics.
+Diagnostics:
+
+- `TEMPO_DIAGNOSTICS=1` opens DevTools.
+- `SMARTSPECTRA_DIAGNOSTICS=1` turns on the SDK's IPC and frame-pump logging.
+- Native SDK log lines (metric authorization, device keys, model load) always
+  go to the terminal that ran `npm start`.
+- `TEMPO_DISABLE_CARDIO=1` requests breathing metrics only, to isolate cardio
+  authorization or device-key failures. It is a diagnostic switch, not the
+  default.
+- `TEMPO_DISABLE_GPU=1` disables Chromium hardware acceleration if the window
+  or camera preview misbehaves on a particular Windows GPU driver.
 
 ### If Electron exits immediately (VS Code terminal)
 
@@ -132,6 +142,103 @@ exported from the renderer entry point.
 Stopping or resetting clears the cards so stale readings cannot be mistaken for
 live ones.
 
+## Runtime failure handling
+
+Findings from the first Windows run and the fixes applied:
+
+1. **"API key missing" while the build said the key was present.** The key was
+   injected correctly (`scripts/build-renderer.mjs` → esbuild `define` →
+   `API_KEY` in the bundle; verified with a dummy key). The banner was a CSS
+   bug: `.banner { display: flex }` overrode the HTML `hidden` attribute, so the
+   setup banner rendered even though `hidden` was set. A global
+   `[hidden] { display: none !important; }` rule fixes all banners/panels.
+2. **Metric request.** The UI now logs the requested bundle by SDK export name
+   and code:
+   `CHEST_BREATHING(0), ABDOMEN_BREATHING(1), BREATHING_RATE(2), PULSE_RATE(15), ARTERIAL_PRESSURE_TRACE(16), HRV(17)`.
+   Every code is validated against `MetricType` from the installed 3.5.0 SDK;
+   unsupported codes would be dropped and logged. All six are supported, so
+   `cardioMetrics` is kept.
+3. **`ConfigurationFailed` (3).** The native message and classification are now
+   shown in the failure panel: authentication, metric authorization,
+   model/device-key provisioning, invalid configuration, credit, network, or
+   processing. If the full bundle fails with `kConfigurationFailed`, the app
+   retries once with breathing only and reports the original native error; that
+   mirrors the cardio failure mode documented by the official sample (cardio
+   outputs need authorization/device keys). If the retry also fails, the full error is
+   shown. `TEMPO_DISABLE_CARDIO=1` forces breathing-only from the first attempt.
+4. **Camera `AbortError: Timeout starting video source`.** The SDK's default
+   renderer acquisition uses `facingMode: 'user'`, which Windows desktop
+   cameras do not reliably honour. If the default acquisition times out (or
+   reports `NotReadableError`), the session retries once through the official
+   `useMediaStream()` path with a host-acquired stream using only ideal
+   width/height/fps — no facingMode. The event log lists detected video inputs
+   and can distinguish permission denial, camera-in-use, timeout, and missing
+   device. If the retry also fails, the camera failure is shown with that
+   guidance.
+5. **Black preview.** The renderer SDK releases its camera when `start()`
+   fails, but the UI kept the old stream and the label "live". The panel now
+   clears on `kError`, SDK errors, and fallback; listens for the preview track's
+   `ended` event; logs `loadedmetadata`/`playing`; and shows `acquiring`,
+   `live WxH`, `paused`, or `released` instead of assuming success.
+
+Native log lines are not captured inside the renderer; they remain in the
+main-process terminal and the failure panel tells the tester to read them.
+
+### Blank window / boot failure
+
+An empty DevTools DOM (`<html><head></head><body></body>`) means the page was
+never parsed, not that a metric failed. `main.js` now:
+
+- logs the absolute `index.html` path, its size, `did-finish-load`, and the
+  final URL;
+- reports `did-fail-load`, `preload-error`, `render-process-gone`, renderer
+  `unresponsive`, and Chromium `child-process-gone` details to the terminal;
+- shows a readable boot-failure page inside the window instead of leaving
+  `about:blank`;
+- binds the SmartSpectra IPC bridge only after `did-finish-load`, so a slow
+  native `preconfigure()` cannot block the first paint.
+
+Check the terminal for `[tempo] loading … (N bytes)` and
+`[tempo] did-finish-load …`. If the build reports ~335 kB, it is the old bundle;
+the current bundle is ~349 kB. A 335 kB build also still shows the old CSS
+`[hidden]` bug (the API-key banner appears even when the key is present) and has
+none of the camera retry or failure diagnostics in this document.
+
+### Windows retest
+
+```powershell
+cd C:\path\to\tempo
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+$env:SMARTSPECTRA_DIAGNOSTICS = "1"
+$env:TEMPO_DIAGNOSTICS = "1"
+npm start
+```
+
+Use the key from `.env`/`.env.local`, or set `$env:SMARTSPECTRA_API_KEY` in the
+same shell. Check, in order:
+
+1. Event log says `API key: present` and the setup banner is **not** shown.
+2. Event log lists the six validated metric names/codes.
+3. Camera panel reads `live WIDTHxHEIGHT` (not just "live").
+4. If the default camera times out, the log shows `default camera acquisition
+   failed … retrying with a host MediaStream without facingMode` and the video
+   inputs it found. If that retry fails too, the failure panel explains
+   permission denial, camera-in-use, timeout, or missing device.
+5. If `ConfigurationFailed` occurs, an amber fallback banner appears with the
+   native message, followed by a breathing-only retry. If the retry succeeds,
+   real breathing metrics arrive; if it fails, the red failure panel shows the
+   full message and classification.
+6. **Copy details** in the failure panel captures code, kind, source, requested
+   metrics, and the complete native message for the report.
+
+To isolate cardio without relying on the fallback:
+
+```powershell
+$env:TEMPO_DISABLE_CARDIO = "1"
+npm start
+Remove-Item Env:TEMPO_DISABLE_CARDIO -ErrorAction SilentlyContinue
+```
+
 ## Project layout
 
 | File | Purpose |
@@ -150,13 +257,25 @@ a custom preload.
 
 - `npm install` completed with `@smartspectra/node-sdk` **3.5.0** and the
   per-platform native packages (`win32-x64` included).
-- `npm run build` produced `dist/renderer.bundle.js` (~335 kB) using only the
+- `npm run build` produced `dist/renderer.bundle.js` (~349 kB) using only the
   official entry points (`/renderer`, `/messages`, `/main`, `/preload`).
+- A dummy key (never a real key) was injected into the bundle to prove the
+  `.env` → esbuild → renderer path; the emitted bundle contained the dummy
+  value and `CARDIO_DISABLED`.
 - `require('@smartspectra/node-sdk')` loads the native runtime successfully
   (Linux x64 sandbox) and reports SDK version 3.5.0.
 - `decodeMetrics` was smoke-tested against a protobuf `Metrics` payload to
   confirm the field paths used by the UI (`breathing.rate`,
   `cardio.pulseRate`, `cardio.hrv`).
+- A native probe with a fake key showed the cardio path's documented
+  dependencies: `Metrics authorization failed`, `POST /device/pair failed`, and
+  `LoadInternal failed for model_id=phasic-bp-inference`. This is why cardio
+  configuration failures are classified and retried breathing-only.
+- The metric resolver and failure classifier were bundled and executed: all
+  six requested codes resolve, `[]` are unsupported, and auth/metric/model/
+  config/processing messages classify to distinct kinds.
+- `[hidden]` banner behavior and preview state transitions were verified by
+  static inspection only; no display was available.
 
 **Not verified here:** the actual Electron window, camera acquisition, Presage
 authentication, and live measurements. The workspace available to this session
@@ -172,6 +291,7 @@ this milestone.
 | --- | --- |
 | Setup banner: API key missing | Add `SMARTSPECTRA_API_KEY` to `.env` or `.env.local`, then restart with `npm start` (the bundle is rebuilt on every start). |
 | `kAuthenticationFailed` | Wrong/expired key, or the key is not enabled for the requested metrics. Verify it at physiology.presagetech.com. |
+| `ConfigurationFailed (3)` | Native configuration rejection. The failure panel classifies it from the native message. If it happens with cardio, the app retries breathing-only; check the terminal for `Metrics authorization failed`, `Failed to load device keys`, or a model-load error. |
 | Cardio cards stay `unavailable` while breathing works | The API key is not provisioned for cardio outputs; the SDK omits unauthorized metrics without error. Request cardio access or test with breathing only. |
 | `Refused to create a worker from 'blob:…'` | The page CSP must keep `worker-src 'self' blob:`. |
 | `window.__smartspectraBridge is unavailable` | `webPreferences.preload` must resolve to `@smartspectra/node-sdk/preload`, with `bindSmartSpectraIpc(win)` called in the main process. |

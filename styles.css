@@ -18,6 +18,10 @@
 
 * { box-sizing: border-box; }
 
+/* The UA stylesheet's [hidden] rule loses to any author `display` rule
+   (e.g. .banner { display: flex }), which made hidden banners render. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
@@ -81,13 +85,16 @@ code {
     border: 1px solid var(--border-strong);
     background: var(--panel);
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     align-items: baseline;
     font-size: 13px;
 }
 
 .banner-setup { border-color: #6b5722; background: #1a170e; color: #f0dca8; }
+.banner-warn { border-color: #6b5722; background: #1a170e; color: #f0dca8; }
 .banner-error { border-color: #6b2f2d; background: #1c1111; color: #f2c3c1; }
+.banner-detail { display: block; margin-top: 4px; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; white-space: pre-wrap; }
 .banner-code {
     font-family: ui-monospace, Consolas, monospace;
     font-size: 12px;
@@ -209,6 +216,7 @@ code {
 .stats div { display: flex; flex-direction: column; gap: 2px; }
 .stats dt { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
 .stats dd { margin: 0; font-variant-numeric: tabular-nums; }
+.metric-list { font-size: 11.5px; line-height: 1.45; word-break: break-word; }
 
 /* Metrics --------------------------------------------------------------- */
 .metric-grid {
@@ -271,6 +279,23 @@ code {
     color: #f0dca8;
     border-radius: 8px;
     font-size: 12.5px;
+}
+
+/* Failure diagnostics ---------------------------------------------------- */
+.failure-panel { display: flex; flex-direction: column; gap: 8px; }
+.failure-panel pre {
+    margin: 0;
+    font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #f0c9c7;
+    background: #1c1111;
+    border: 1px solid #6b2f2d;
+    border-radius: 8px;
+    padding: 10px;
+    max-height: 220px;
+    overflow: auto;
 }
 
 /* Log ------------------------------------------------------------------- */

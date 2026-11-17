@@ -31,6 +31,11 @@
         <span id="error-message"></span>
     </div>
 
+    <div id="fallback-banner" class="banner banner-warn" hidden>
+        <strong>Cardio configuration failed.</strong>
+        <span id="fallback-message"></span>
+    </div>
+
     <main class="layout">
         <section class="col col-preview">
             <div class="panel panel-preview">
@@ -66,7 +71,7 @@
                     <div><dt>SDK version</dt><dd id="sdk-version">—</dd></div>
                     <div><dt>Packet receipts</dt><dd id="stat-packets">0</dd></div>
                     <div><dt>Last packet</dt><dd id="stat-last">—</dd></div>
-                    <div><dt>Requested</dt><dd>breathing + cardio</dd></div>
+                    <div><dt>Requested</dt><dd id="stat-metrics" class="metric-list">—</dd></div>
                 </dl>
             </div>
         </section>
@@ -132,6 +137,19 @@
                 provisioned for cardio metrics, not a camera problem.
             </div>
 
+            <div id="failure-panel" class="panel failure-panel" hidden>
+                <div class="panel-head">
+                    <h2>Last SDK failure</h2>
+                    <button id="btn-copy-failure" type="button" class="btn btn-tiny">Copy details</button>
+                </div>
+                <pre id="failure-detail"></pre>
+                <p class="footnote">
+                    The full native diagnostic (device keys, metric authorization, model load) is printed in the
+                    terminal that ran <code>npm start</code>. Run with <code>SMARTSPECTRA_DIAGNOSTICS=1</code>
+                    for IPC-level detail.
+                </p>
+            </div>
+
             <div class="panel panel-log">
                 <div class="panel-head">
                     <h2>SDK event log</h2>
@@ -144,7 +162,8 @@
 
     <footer class="footer">
         <span>Actual SDK measurements only — no simulated data.</span>
-        <span>Validation hints and states come straight from SmartSpectra.</span>
+        <span>Native SDK logs stay in the main-process terminal. Run with
+            <code>SMARTSPECTRA_DIAGNOSTICS=1</code> for IPC detail.</span>
     </footer>
 
     <script src="./dist/renderer.bundle.js"></script>

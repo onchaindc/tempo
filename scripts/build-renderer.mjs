@@ -61,6 +61,13 @@ function readLocalEnv() {
 readLocalEnv();
 
 const apiKey = (process.env.SMARTSPECTRA_API_KEY || '').trim();
+// Diagnostic switch: request breathing only, to isolate cardio authorization
+// or device-key provisioning failures from the rest of the pipeline.
+const cardioDisabled = process.env.TEMPO_DISABLE_CARDIO === '1';
+
+if (cardioDisabled) {
+    console.warn('[tempo] TEMPO_DISABLE_CARDIO=1 — requesting breathing metrics only.');
+}
 
 if (!apiKey) {
     console.warn(
@@ -89,6 +96,7 @@ await build({
     logLevel: 'info',
     define: {
         __SMARTSPECTRA_API_KEY__: JSON.stringify(apiKey),
+        __TEMPO_DISABLE_CARDIO__: JSON.stringify(cardioDisabled),
     },
 });
 
