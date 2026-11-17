@@ -242,7 +242,8 @@ const FAILURE_KIND_TEXT = {
     'invalid-configuration':
         'Invalid configuration — native ConfigurationFailed without a more specific metric or auth hint in the message.',
     'credit-exhausted': 'Credit exhausted — the Presage account has no measurement credit left.',
-    network: 'Network failure — the SDK could not reach the Presage service.',
+    network:
+        'Network failure — the SDK could not reach the Presage service. Check VPN, proxy, and firewall access to Presage, then retry.',
     processing: 'Processing failure after the session started.',
     camera: 'Camera acquisition failure — the OS or another app prevented the camera from starting.',
     unknown: 'Unclassified SDK failure.',
@@ -355,6 +356,11 @@ session.on('decodeError', ({ error, packetIndex }) => {
         kind: 'unknown',
         source: 'decode',
     }, { releasePreview: false });
+});
+
+session.on('releasedAfterError', () => {
+    clearPreview('camera released after SDK error');
+    log('SDK entered an error state: stopped frames and released the camera', 'warn');
 });
 
 session.on('cameraRetry', ({ failure }) => {

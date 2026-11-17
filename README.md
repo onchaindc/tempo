@@ -175,7 +175,13 @@ Findings from the first Windows run and the fixes applied:
    and can distinguish permission denial, camera-in-use, timeout, and missing
    device. If the retry also fails, the camera failure is shown with that
    guidance.
-5. **Black preview.** The renderer SDK releases its camera when `start()`
+5. **Camera stays on after a mid-session error.** The renderer SDK's frame loop
+   kept posting frames after the native session entered `kError`
+   (`SmartSpectra is not in a valid state`), and the camera indicator stayed on.
+   A fatal error now triggers one automatic SDK `reset()`: the frame pump stops,
+   the SDK-owned stream is released, host streams are stopped, and the UI shows
+   `camera released after SDK error`. The user can Start again.
+6. **Black preview.** The renderer SDK releases its camera when `start()`
    fails, but the UI kept the old stream and the label "live". The panel now
    clears on `kError`, SDK errors, and fallback; listens for the preview track's
    `ended` event; logs `loadedmetadata`/`playing`; and shows `acquiring`,
@@ -200,7 +206,7 @@ never parsed, not that a metric failed. `main.js` now:
 
 Check the terminal for `[tempo] loading … (N bytes)` and
 `[tempo] did-finish-load …`. If the build reports ~335 kB, it is the old bundle;
-the current bundle is ~349 kB. A 335 kB build also still shows the old CSS
+the current bundle is ~350 kB. A 335 kB build also still shows the old CSS
 `[hidden]` bug (the API-key banner appears even when the key is present) and has
 none of the camera retry or failure diagnostics in this document.
 
@@ -257,7 +263,7 @@ a custom preload.
 
 - `npm install` completed with `@smartspectra/node-sdk` **3.5.0** and the
   per-platform native packages (`win32-x64` included).
-- `npm run build` produced `dist/renderer.bundle.js` (~349 kB) using only the
+- `npm run build` produced `dist/renderer.bundle.js` (~350 kB) using only the
   official entry points (`/renderer`, `/messages`, `/main`, `/preload`).
 - A dummy key (never a real key) was injected into the bundle to prove the
   `.env` → esbuild → renderer path; the emitted bundle contained the dummy

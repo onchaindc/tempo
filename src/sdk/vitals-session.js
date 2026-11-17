@@ -236,6 +236,9 @@ export class VitalsSession {
         this._fallbackActive = false;
         this._hostStream = null;
         this._cameraRetryUsed = false;
+        this._starting = false;
+        this._errorCleanup = null;
+        this._fatalHandled = false;
         this._requested = resolveRequestedMetrics({ cardio: this._cardioRequested });
     }
 
@@ -294,6 +297,12 @@ export class VitalsSession {
 
         sdk.on('processingStatus', (status) => {
             this._emit('processingStatus', { status, label: statusLabel(status) });
+            // A mid-session failure leaves the SDK's frame pump running against
+            // an invalid native session (dropped-frame spam) and keeps the
+            // camera open. Reset once the status settles into kError.
+            if (status === ProcessingStatus.kError && !this._starting && !this._fatalHandled) {
+                void this._cleanupAfterFatalError();
+            }
         });
 
         sdk.on('validationStatus', (code, timestampUs, hint) => {
@@ -332,6 +341,7 @@ export class VitalsSession {
                 kind: classifyFailure(code, message),
                 source: 'sdk',
             });
+            if (!this._starting && !this._fatalHandled) void this._cleanupAfterFatalError();
         });
 
         this._sdk = sdk;
@@ -439,8 +449,48 @@ export class VitalsSession {
             throw error;
         }
 
+        this._starting = true;
+        try {
+            await this._startSession();
+        } finally {
+            this._starting = false;
+        }
+    }
+
+    /**
+     * Stop the frame pump and release the camera after the SDK enters a fatal
+     * state. reset() is the official lifecycle call after kError and releases
+     * the SDK-owned stream; host streams are ours, so release them too.
+     */
+    async _cleanupAfterFatalError() {
+        if (this._errorCleanup) return this._errorCleanup;
+        if (this._fatalHandled) return undefined;
+        this._fatalHandled = true;
+        const sdk = this._sdk;
+        this._errorCleanup = (async () => {
+            try {
+                if (sdk && sdk === this._sdk) {
+                    try {
+                        await sdk.reset();
+                    } catch (error) {
+                        console.warn('[tempo] post-error reset failed:', error && error.message ? error.message : error);
+                        if (this._sdk === sdk) this._destroySdk();
+                    }
+                }
+            } finally {
+                this._releaseHostStream();
+                this._emit('releasedAfterError');
+                this._errorCleanup = null;
+            }
+        })();
+        return this._errorCleanup;
+    }
+
+    /** Body of start(); the public method tracks the in-flight state. */
+    async _startSession() {
         // One host-stream retry is allowed per start attempt.
         this._cameraRetryUsed = false;
+        this._fatalHandled = false;
 
         const sdk = this._ensureSdk();
         try {
@@ -533,6 +583,11 @@ export class VitalsSession {
      * next start retries the full metric bundle; otherwise use the SDK's reset.
      */
     async reset() {
+        // An automatic post-error cleanup may already be running.
+        if (this._errorCleanup) {
+            await this._errorCleanup;
+            return;
+        }
         if (!this._sdk) {
             this._releaseHostStream();
             return;
@@ -541,6 +596,7 @@ export class VitalsSession {
             this._destroySdk();
             this._fallbackActive = false;
             this._cameraRetryUsed = false;
+            this._fatalHandled = false;
             return;
         }
         await this._sdk.reset();
