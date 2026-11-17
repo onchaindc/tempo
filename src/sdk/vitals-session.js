@@ -231,12 +231,18 @@ export function summarizeMetrics(metrics) {
 export class VitalsSession {
     constructor({ apiKey, cardio = true, cameraOverride = null } = {}) {
         this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+        const overrideIndex =
+            cameraOverride && Number.isInteger(cameraOverride.index) && cameraOverride.index >= 0
+                ? cameraOverride.index
+                : -1;
+        const overrideSize = cameraOverride && cameraOverride.width > 0 && cameraOverride.height > 0;
         this._cameraOverride =
-            cameraOverride && cameraOverride.width > 0 && cameraOverride.height > 0
+            overrideSize || overrideIndex >= 0
                 ? {
-                    width: cameraOverride.width,
-                    height: cameraOverride.height,
+                    width: overrideSize ? cameraOverride.width : 1280,
+                    height: overrideSize ? cameraOverride.height : 720,
                     fps: cameraOverride.fps > 0 ? cameraOverride.fps : 30,
+                    index: overrideIndex,
                 }
                 : null;
         this._listeners = new Map();
@@ -304,6 +310,8 @@ export class VitalsSession {
 
         sdk.on('streamAvailable', (stream) => {
             this._emit('stream', stream);
+            // Labels become readable once the camera permission is granted.
+            void this._emitCameraDevices();
         });
 
         sdk.on('processingStatus', (status) => {
@@ -400,24 +408,8 @@ export class VitalsSession {
         this._hostStream = null;
     }
 
-    /**
-     * Host-side camera acquisition used only if the SDK's default getUserMedia
-     * times out. The SDK's default constraints include `facingMode: 'user'`;
-     * Windows desktop cameras do not reliably honour facing-mode selection, so
-     * the retry uses plain ideal width/height/fps with no facingMode — still
-     * the official renderer path, via useMediaStream().
-     */
-    async _acquireHostStream(override = null) {
-        const target = override || { width: 1280, height: 720, fps: 30 };
-        const constraints = {
-            audio: false,
-            video: {
-                width: { ideal: target.width },
-                height: { ideal: target.height },
-                frameRate: { ideal: target.fps },
-            },
-        };
-
+    /** Log the video inputs Windows exposes, with labels after permission. */
+    async _emitCameraDevices() {
         try {
             const devices = await navigator.mediaDevices.enumerateDevices();
             const cameras = devices
@@ -427,10 +419,58 @@ export class VitalsSession {
                     label: device.label || '(label hidden until camera permission is granted)',
                     deviceIdSuffix: device.deviceId ? device.deviceId.slice(-6) : '(none)',
                 }));
+            this._emit('cameraDevices', {
+                cameras,
+                constraints: { video: { width: 1280, height: 720, frameRate: 30 } },
+            });
+        } catch (error) {
+            this._emit('cameraDevices', { cameras: [], constraints: { video: {} }, error: error.message });
+        }
+    }
+
+    /**
+     * Host-side camera acquisition used only if the SDK's default getUserMedia
+     * times out. The SDK's default constraints include `facingMode: 'user'`;
+     * Windows desktop cameras do not reliably honour facing-mode selection, so
+     * the retry uses plain ideal width/height/fps with no facingMode — still
+     * the official renderer path, via useMediaStream().
+     */
+    async _acquireHostStream(override = null) {
+        const target = override || { width: 1280, height: 720, fps: 30, index: -1 };
+        const constraints = {
+            audio: false,
+            video: {
+                width: { ideal: target.width },
+                height: { ideal: target.height },
+                frameRate: { ideal: target.fps },
+            },
+        };
+
+        let deviceLabel = 'default camera';
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const inputs = devices.filter((device) => device.kind === 'videoinput');
+            const cameras = inputs.map((device, index) => ({
+                index,
+                label: device.label || '(label hidden until camera permission is granted)',
+                deviceIdSuffix: device.deviceId ? device.deviceId.slice(-6) : '(none)',
+            }));
             this._emit('cameraDevices', { cameras, constraints });
+
+            if (target.index >= 0) {
+                const selected = inputs[target.index];
+                if (selected && selected.deviceId) {
+                    constraints.video.deviceId = { exact: selected.deviceId };
+                    deviceLabel = selected.label || `camera ${target.index}`;
+                } else {
+                    console.warn(`[tempo] camera index ${target.index} not found; using default camera`);
+                }
+            }
         } catch (error) {
             this._emit('cameraDevices', { cameras: [], constraints, error: error.message });
         }
+
+        this._emit('cameraSelected', { label: deviceLabel, index: target.index });
 
         try {
             return await navigator.mediaDevices.getUserMedia(constraints);

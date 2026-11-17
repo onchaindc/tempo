@@ -411,6 +411,10 @@ session.on('cameraRetry', ({ failure }) => {
     );
 });
 
+session.on('cameraSelected', ({ label, index }) => {
+    log(`camera selected: ${label}${index >= 0 ? ` (index ${index})` : ' (SDK default)'}`);
+});
+
 session.on('cameraDevices', ({ cameras, constraints, error }) => {
     if (error) {
         log(`could not enumerate video devices: ${error}`, 'warn');
@@ -511,9 +515,10 @@ els.btnReset.addEventListener('click', resetSession);
 // --- Boot ------------------------------------------------------------------
 
 log(`API key: ${session.hasApiKey ? 'present' : 'MISSING'}`);
-if (CAMERA_OVERRIDE && CAMERA_OVERRIDE.width > 0) {
+if (CAMERA_OVERRIDE && (CAMERA_OVERRIDE.width > 0 || CAMERA_OVERRIDE.index >= 0)) {
     log(
-        `camera override: ${CAMERA_OVERRIDE.width}x${CAMERA_OVERRIDE.height} @ ${CAMERA_OVERRIDE.fps} fps ` +
+        `camera override: ${CAMERA_OVERRIDE.width || 1280}x${CAMERA_OVERRIDE.height || 720} @ ` +
+        `${CAMERA_OVERRIDE.fps || 30} fps, device index ${CAMERA_OVERRIDE.index} ` +
         '(host MediaStream, no facingMode)',
     );
 }

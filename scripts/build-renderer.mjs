@@ -70,14 +70,20 @@ const cardioDisabled = process.env.TEMPO_DISABLE_CARDIO === '1';
 const cameraWidth = Number.parseInt(process.env.TEMPO_CAMERA_WIDTH || '0', 10) || 0;
 const cameraHeight = Number.parseInt(process.env.TEMPO_CAMERA_HEIGHT || '0', 10) || 0;
 const cameraFps = Number.parseInt(process.env.TEMPO_CAMERA_FPS || '0', 10) || 0;
+const cameraIndexRaw = process.env.TEMPO_CAMERA_INDEX;
+const cameraIndex =
+    cameraIndexRaw === undefined || cameraIndexRaw === ''
+        ? -1
+        : Math.max(0, Number.parseInt(cameraIndexRaw, 10) || 0);
 const cameraOverride =
     cameraWidth > 0 && cameraHeight > 0
-        ? { width: cameraWidth, height: cameraHeight, fps: cameraFps > 0 ? cameraFps : 30 }
-        : { width: 0, height: 0, fps: 0 };
+        ? { width: cameraWidth, height: cameraHeight, fps: cameraFps > 0 ? cameraFps : 30, index: cameraIndex }
+        : { width: 0, height: 0, fps: 0, index: cameraIndex };
 
-if (cameraOverride.width > 0) {
+if (cameraOverride.width > 0 || cameraOverride.index >= 0) {
     console.warn(
-        `[tempo] camera override: ${cameraOverride.width}x${cameraOverride.height} @ ${cameraOverride.fps} fps`,
+        `[tempo] camera override: ${cameraOverride.width || 1280}x${cameraOverride.height || 720} @ ` +
+        `${cameraOverride.fps || 30} fps, device index ${cameraOverride.index}`,
     );
 }
 

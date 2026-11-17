@@ -96,6 +96,8 @@ Diagnostics:
   `TEMPO_CAMERA_FPS=30`) forces a host-acquired camera stream at that resolution
   for throughput diagnosis. The Session panel shows the measured frame rate
   from `frameSentThrough`, independent of the camera's nominal setting.
+- `TEMPO_CAMERA_INDEX=0,1,…` selects a specific video input by the index logged
+  in the event log — useful when Windows exposes an IR or virtual camera first.
 
 ### If Electron exits immediately (VS Code terminal)
 
@@ -219,7 +221,7 @@ never parsed, not that a metric failed. `main.js` now:
 
 Check the terminal for `[tempo] loading … (N bytes)` and
 `[tempo] did-finish-load …`. If the build reports ~335 kB, it is the old bundle;
-the current bundle is ~356 kB. A 335 kB build also still shows the old CSS
+the current bundle is ~358 kB. A 335 kB build also still shows the old CSS
 `[hidden]` bug (the API-key banner appears even when the key is present) and has
 none of the camera retry or failure diagnostics in this document.
 
@@ -276,7 +278,7 @@ a custom preload.
 
 - `npm install` completed with `@smartspectra/node-sdk` **3.5.0** and the
   per-platform native packages (`win32-x64` included).
-- `npm run build` produced `dist/renderer.bundle.js` (~356 kB) using only the
+- `npm run build` produced `dist/renderer.bundle.js` (~358 kB) using only the
   official entry points (`/renderer`, `/messages`, `/main`, `/preload`).
 - A dummy key (never a real key) was injected into the bundle to prove the
   `.env` → esbuild → renderer path; the emitted bundle contained the dummy
