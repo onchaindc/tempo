@@ -1,0 +1,19 @@
+{
+  "name": "tempo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TEMPO — physiological-responsive digital environment. Milestone 1: SmartSpectra SDK bring-up.",
+  "main": "main.js",
+  "scripts": {
+    "build": "node scripts/build-renderer.mjs",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron ."
+  },
+  "dependencies": {
+    "@smartspectra/node-sdk": "latest"
+  },
+  "devDependencies": {
+    "electron": "43.8.1",
+    "esbuild": "^0.25.0"
+  }
+}
