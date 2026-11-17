@@ -15,6 +15,7 @@ import {
 // Injected by scripts/build-renderer.mjs from the local environment.
 const API_KEY = __SMARTSPECTRA_API_KEY__;
 const CARDIO_DISABLED = __TEMPO_DISABLE_CARDIO__;
+const CAMERA_OVERRIDE = __TEMPO_CAMERA_OVERRIDE__;
 
 const $ = (id) => document.getElementById(id);
 
@@ -39,6 +40,7 @@ const els = {
     statPackets: $('stat-packets'),
     statLast: $('stat-last'),
     statMetrics: $('stat-metrics'),
+    statFps: $('stat-fps'),
     cardioNote: $('cardio-note'),
     failurePanel: $('failure-panel'),
     failureDetail: $('failure-detail'),
@@ -48,6 +50,7 @@ const els = {
 const session = new VitalsSession({
     apiKey: API_KEY,
     cardio: !CARDIO_DISABLED,
+    cameraOverride: CAMERA_OVERRIDE,
 });
 
 let packetCount = 0;
@@ -245,6 +248,8 @@ const FAILURE_KIND_TEXT = {
     network:
         'Network failure — the SDK could not reach the Presage service. Check VPN, proxy, and firewall access to Presage, then retry.',
     processing: 'Processing failure after the session started.',
+    'frame-rate':
+        'Sustained low frame rate — the SDK did not receive frames fast enough to measure reliably. Improve lighting (webcams drop fps in dim light), close CPU-heavy apps, use a high-performance power plan, and avoid virtual cameras.',
     camera: 'Camera acquisition failure — the OS or another app prevented the camera from starting.',
     unknown: 'Unclassified SDK failure.',
 };
@@ -381,6 +386,18 @@ session.on('decodeError', ({ error, packetIndex }) => {
     }, { releasePreview: false });
 });
 
+let lastFpsWarn = 0;
+session.on('frameRate', ({ fps, rejected }) => {
+    els.statFps.textContent =
+        `${fps.toFixed(1)} fps${rejected > 0 ? ` (${rejected} rejected)` : ''}`;
+
+    const now = Date.now();
+    if (fps < 25 && now - lastFpsWarn > 5000) {
+        lastFpsWarn = now;
+        log(`measured frame rate ${fps.toFixed(1)} fps${rejected ? `, ${rejected} rejected` : ''} — below 30 fps`, 'warn');
+    }
+});
+
 session.on('releasedAfterError', () => {
     clearPreview('camera released after SDK error');
     log('SDK entered an error state: stopped frames and released the camera', 'warn');
@@ -437,7 +454,8 @@ async function startMeasurement() {
     els.statPackets.textContent = '0';
     els.statLast.textContent = '—';
     clearMetrics();
-    els.btnStart.disabled = true;
+                els.btnStart.disabled = true;
+    els.statFps.textContent = '—';
     log('start() requested');
 
     try {
@@ -493,6 +511,12 @@ els.btnReset.addEventListener('click', resetSession);
 // --- Boot ------------------------------------------------------------------
 
 log(`API key: ${session.hasApiKey ? 'present' : 'MISSING'}`);
+if (CAMERA_OVERRIDE && CAMERA_OVERRIDE.width > 0) {
+    log(
+        `camera override: ${CAMERA_OVERRIDE.width}x${CAMERA_OVERRIDE.height} @ ${CAMERA_OVERRIDE.fps} fps ` +
+        '(host MediaStream, no facingMode)',
+    );
+}
 if (CARDIO_DISABLED) {
     log('TEMPO_DISABLE_CARDIO=1 — cardio bundle is disabled for this run', 'warn');
 }

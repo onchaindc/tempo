@@ -117,8 +117,10 @@ export function classifyFailure(code, message) {
         return 'model-provisioning';
     }
     if (code === SmartSpectraErrorCode.kConfigurationFailed) return 'invalid-configuration';
+    if (code === SmartSpectraErrorCode.kMetricNotAuthorized) return 'metric-authorization';
     if (code === SmartSpectraErrorCode.kCreditExhausted) return 'credit-exhausted';
     if (code === SmartSpectraErrorCode.kNetworkError) return 'network';
+    if (code === SmartSpectraErrorCode.kSustainedLowFrameRate) return 'frame-rate';
     if (code === SmartSpectraErrorCode.kProcessingFailed) return 'processing';
     return 'unknown';
 }
@@ -227,8 +229,16 @@ export function summarizeMetrics(metrics) {
  *   'error'            { code, label, message, retryable, kind, source }
  */
 export class VitalsSession {
-    constructor({ apiKey, cardio = true } = {}) {
+    constructor({ apiKey, cardio = true, cameraOverride = null } = {}) {
         this.apiKey = typeof apiKey === 'string' ? apiKey.trim() : '';
+        this._cameraOverride =
+            cameraOverride && cameraOverride.width > 0 && cameraOverride.height > 0
+                ? {
+                    width: cameraOverride.width,
+                    height: cameraOverride.height,
+                    fps: cameraOverride.fps > 0 ? cameraOverride.fps : 30,
+                }
+                : null;
         this._listeners = new Map();
         this._sdk = null;
         this._packetIndex = 0;
@@ -239,6 +249,7 @@ export class VitalsSession {
         this._starting = false;
         this._errorCleanup = null;
         this._fatalHandled = false;
+        this._frameWindow = null;
         this._requested = resolveRequestedMetrics({ cardio: this._cardioRequested });
     }
 
@@ -332,6 +343,24 @@ export class VitalsSession {
             }
         });
 
+        sdk.on('frameSentThrough', (sent) => {
+            const now = Date.now();
+            if (!this._frameWindow) this._frameWindow = { start: now, sent: 0, rejected: 0 };
+            const window = this._frameWindow;
+            if (sent) window.sent += 1;
+            else window.rejected += 1;
+
+            const elapsed = now - window.start;
+            if (elapsed >= 1000) {
+                this._emit('frameRate', {
+                    fps: (window.sent * 1000) / elapsed,
+                    rejected: window.rejected,
+                    windowMs: elapsed,
+                });
+                this._frameWindow = { start: now, sent: 0, rejected: 0 };
+            }
+        });
+
         sdk.on('error', (code, message, retryable) => {
             this._emit('error', {
                 code,
@@ -378,13 +407,14 @@ export class VitalsSession {
      * the retry uses plain ideal width/height/fps with no facingMode — still
      * the official renderer path, via useMediaStream().
      */
-    async _acquireHostStream() {
+    async _acquireHostStream(override = null) {
+        const target = override || { width: 1280, height: 720, fps: 30 };
         const constraints = {
             audio: false,
             video: {
-                width: { ideal: 1280 },
-                height: { ideal: 720 },
-                frameRate: { ideal: 30 },
+                width: { ideal: target.width },
+                height: { ideal: target.height },
+                frameRate: { ideal: target.fps },
             },
         };
 
@@ -422,6 +452,15 @@ export class VitalsSession {
             wrapped.code = 'TEMPO_CAMERA';
             throw wrapped;
         }
+    }
+
+    /** Acquire and attach the configured override stream, if any. */
+    async _applyCameraOverride(sdk) {
+        if (!this._cameraOverride || this._hostStream) return;
+        const stream = await this._acquireHostStream(this._cameraOverride);
+        this._hostStream = stream;
+        this._emit('stream', stream);
+        sdk.useMediaStream(stream);
     }
 
     _shouldRetryCamera(failure) {
@@ -491,8 +530,29 @@ export class VitalsSession {
         // One host-stream retry is allowed per start attempt.
         this._cameraRetryUsed = false;
         this._fatalHandled = false;
+        this._frameWindow = null;
 
         const sdk = this._ensureSdk();
+
+        // Explicit resolution/fps override for throughput diagnosis: acquire
+        // the stream ourselves and use the official useMediaStream() path.
+        if (this._cameraOverride && !this._hostStream) {
+            try {
+                await this._applyCameraOverride(sdk);
+            } catch (error) {
+                const failure = {
+                    code: 'CAMERA',
+                    label: 'CameraUnavailable',
+                    message: error.message,
+                    retryable: true,
+                    kind: 'camera',
+                    source: 'camera override',
+                };
+                this._emit('error', failure);
+                throw error;
+            }
+        }
+
         try {
             await sdk.start();
             return;
@@ -535,7 +595,8 @@ export class VitalsSession {
             const canFallback =
                 !this._fallbackActive &&
                 this._cardioRequested &&
-                failure.code === SmartSpectraErrorCode.kConfigurationFailed;
+                (failure.code === SmartSpectraErrorCode.kConfigurationFailed ||
+                    failure.code === SmartSpectraErrorCode.kMetricNotAuthorized);
 
             if (canFallback) {
                 this._emit('fallback', { failure, from: this._requested });
@@ -548,7 +609,11 @@ export class VitalsSession {
                 // so the replacement start queues behind its teardown barrier.
                 await new Promise((resolve) => setTimeout(resolve, 250));
                 try {
-                    await this._ensureSdk().start();
+                    const retrySdk = this._ensureSdk();
+                    if (this._cameraOverride) {
+                        await this._applyCameraOverride(retrySdk);
+                    }
+                    await retrySdk.start();
                     return;
                 } catch (retryError) {
                     const retryFailure = normalizeFailure(retryError, 'start (breathing-only retry)');

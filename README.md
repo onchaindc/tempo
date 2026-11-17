@@ -92,6 +92,10 @@ Diagnostics:
   default.
 - `TEMPO_DISABLE_GPU=1` disables Chromium hardware acceleration if the window
   or camera preview misbehaves on a particular Windows GPU driver.
+- `TEMPO_CAMERA_WIDTH=640 TEMPO_CAMERA_HEIGHT=480` (optionally
+  `TEMPO_CAMERA_FPS=30`) forces a host-acquired camera stream at that resolution
+  for throughput diagnosis. The Session panel shows the measured frame rate
+  from `frameSentThrough`, independent of the camera's nominal setting.
 
 ### If Electron exits immediately (VS Code terminal)
 
@@ -179,7 +183,12 @@ Findings from the first Windows run and the fixes applied:
    and can distinguish permission denial, camera-in-use, timeout, and missing
    device. If the retry also fails, the camera failure is shown with that
    guidance.
-5. **Camera stays on after a mid-session error.** The renderer SDK's frame loop
+5. **SustainedLowFrameRate (14).** The SDK stops when processed frames stay
+   below its reliability threshold. The UI now classifies code 14 (and
+   `kMetricNotAuthorized` 13) instead of reporting "unclassified", and shows the
+   actual measured fps. Dim lighting, CPU contention, virtual cameras, and an
+   open DevTools window can all lower effective throughput.
+6. **Camera stays on after a mid-session error.** The renderer SDK's frame loop
    kept posting frames after the native session entered `kError`
    (`SmartSpectra is not in a valid state`), and the camera indicator stayed on.
    A fatal error now triggers one automatic SDK `reset()`: the frame pump stops,
@@ -210,7 +219,7 @@ never parsed, not that a metric failed. `main.js` now:
 
 Check the terminal for `[tempo] loading … (N bytes)` and
 `[tempo] did-finish-load …`. If the build reports ~335 kB, it is the old bundle;
-the current bundle is ~350 kB. A 335 kB build also still shows the old CSS
+the current bundle is ~356 kB. A 335 kB build also still shows the old CSS
 `[hidden]` bug (the API-key banner appears even when the key is present) and has
 none of the camera retry or failure diagnostics in this document.
 
@@ -267,7 +276,7 @@ a custom preload.
 
 - `npm install` completed with `@smartspectra/node-sdk` **3.5.0** and the
   per-platform native packages (`win32-x64` included).
-- `npm run build` produced `dist/renderer.bundle.js` (~350 kB) using only the
+- `npm run build` produced `dist/renderer.bundle.js` (~356 kB) using only the
   official entry points (`/renderer`, `/messages`, `/main`, `/preload`).
 - A dummy key (never a real key) was injected into the bundle to prove the
   `.env` → esbuild → renderer path; the emitted bundle contained the dummy

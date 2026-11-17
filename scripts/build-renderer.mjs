@@ -65,6 +65,22 @@ const apiKey = (process.env.SMARTSPECTRA_API_KEY || '').trim();
 // or device-key provisioning failures from the rest of the pipeline.
 const cardioDisabled = process.env.TEMPO_DISABLE_CARDIO === '1';
 
+// Optional camera override for throughput diagnosis, e.g.
+// TEMPO_CAMERA_WIDTH=640 TEMPO_CAMERA_HEIGHT=480 TEMPO_CAMERA_FPS=30.
+const cameraWidth = Number.parseInt(process.env.TEMPO_CAMERA_WIDTH || '0', 10) || 0;
+const cameraHeight = Number.parseInt(process.env.TEMPO_CAMERA_HEIGHT || '0', 10) || 0;
+const cameraFps = Number.parseInt(process.env.TEMPO_CAMERA_FPS || '0', 10) || 0;
+const cameraOverride =
+    cameraWidth > 0 && cameraHeight > 0
+        ? { width: cameraWidth, height: cameraHeight, fps: cameraFps > 0 ? cameraFps : 30 }
+        : { width: 0, height: 0, fps: 0 };
+
+if (cameraOverride.width > 0) {
+    console.warn(
+        `[tempo] camera override: ${cameraOverride.width}x${cameraOverride.height} @ ${cameraOverride.fps} fps`,
+    );
+}
+
 if (cardioDisabled) {
     console.warn('[tempo] TEMPO_DISABLE_CARDIO=1 — requesting breathing metrics only.');
 }
@@ -97,6 +113,7 @@ await build({
     define: {
         __SMARTSPECTRA_API_KEY__: JSON.stringify(apiKey),
         __TEMPO_DISABLE_CARDIO__: JSON.stringify(cardioDisabled),
+        __TEMPO_CAMERA_OVERRIDE__: JSON.stringify(cameraOverride),
     },
 });
 
