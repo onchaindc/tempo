@@ -17,7 +17,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, net, session } = require('electron');
 const { bindSmartSpectraIpc } = require('@smartspectra/node-sdk/main');
 
 // Opt-in verbose window/devtools for SDK diagnosis.
@@ -28,6 +28,43 @@ const DIAGNOSTICS = process.env.TEMPO_DIAGNOSTICS === '1';
 if (process.env.TEMPO_DISABLE_GPU === '1') {
     app.disableHardwareAcceleration();
     console.warn('[tempo] TEMPO_DISABLE_GPU=1 — hardware acceleration disabled.');
+}
+
+/**
+ * Log whether the Presage hosts the native SDK talks to are reachable from
+ * this machine. A passing HTTP status is enough; any status proves DNS, TCP,
+ * and TLS work. Results go to the terminal beside the native SDK logs.
+ */
+function probePresageConnectivity() {
+    const probes = [
+        'https://physiology.presagetech.com/',
+        'https://cont-api.physiology.presagetech.com/',
+        'https://medical.physiology.presagetech.com/',
+    ];
+
+    for (const url of probes) {
+        try {
+            const request = net.request({ method: 'GET', url });
+            const timer = setTimeout(() => {
+                console.warn(`[tempo] connectivity timeout (10s): ${url}`);
+                try { request.abort(); } catch { /* already done */ }
+            }, 10_000);
+
+            request.on('response', (response) => {
+                clearTimeout(timer);
+                console.log(`[tempo] connectivity ${url} -> HTTP ${response.statusCode}`);
+                response.on('data', () => {});
+                response.on('end', () => {});
+            });
+            request.on('error', (error) => {
+                clearTimeout(timer);
+                console.error(`[tempo] connectivity ${url} failed: ${error.message}`);
+            });
+            request.end();
+        } catch (error) {
+            console.error(`[tempo] connectivity probe failed for ${url}: ${error.message}`);
+        }
+    }
 }
 
 function escapeHtml(value) {
@@ -175,7 +212,12 @@ app.whenReady().then(() => {
         const url = (details && details.requestingUrl) || (wc && wc.getURL()) || '';
         const mediaTypes = (details && details.mediaTypes) || [];
         const cameraOnly = mediaTypes.length === 1 && mediaTypes[0] === 'video';
-        const granted = permission === 'media' && cameraOnly && url.startsWith('file://');
+        const localPage = url.startsWith('file://');
+        // The diagnostic "Copy details" button uses navigator.clipboard, which
+        // Electron gates behind this permission for file:// pages.
+        const granted =
+            localPage &&
+            ((permission === 'media' && cameraOnly) || permission === 'clipboard-sanitized-write');
         console.log(
             `[tempo] permission=${permission} mediaTypes=[${mediaTypes.join(',')}] ` +
             `url=${url} -> ${granted ? 'granted' : 'denied'}`,
@@ -184,6 +226,7 @@ app.whenReady().then(() => {
     });
 
     createWindow();
+    probePresageConnectivity();
 
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();

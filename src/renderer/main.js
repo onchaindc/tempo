@@ -286,14 +286,37 @@ function showFailure(failure, { releasePreview = true } = {}) {
     if (releasePreview) clearPreview('released after SDK error');
 }
 
+async function copyText(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+        return true;
+    } catch {
+        // Electron gates navigator.clipboard on a permission; fall back to the
+        // selection-based copy so diagnostics are still retrievable.
+    }
+
+    try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.top = '-1000px';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const copied = document.execCommand('copy');
+        area.remove();
+        return copied;
+    } catch {
+        return false;
+    }
+}
+
 els.btnCopyFailure.addEventListener('click', async () => {
     if (!lastFailureText) return;
-    try {
-        await navigator.clipboard.writeText(lastFailureText);
-        log('failure details copied to clipboard');
-    } catch (error) {
-        log(`copy failed: ${error.message}`, 'warn');
-    }
+    const copied = await copyText(lastFailureText);
+    if (copied) log('failure details copied to clipboard');
+    else log('copy failed: clipboard permission denied', 'warn');
 });
 
 // --- SDK events ------------------------------------------------------------

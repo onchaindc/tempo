@@ -83,6 +83,10 @@ Diagnostics:
 - `SMARTSPECTRA_DIAGNOSTICS=1` turns on the SDK's IPC and frame-pump logging.
 - Native SDK log lines (metric authorization, device keys, model load) always
   go to the terminal that ran `npm start`.
+- At startup the app probes `physiology.presagetech.com`,
+  `cont-api.physiology.presagetech.com`, and `medical.physiology.presagetech.com`
+  and logs `[tempo] connectivity … -> HTTP <status>` or the exact network error.
+  This distinguishes a local firewall/VPN/DNS problem from an SDK bug.
 - `TEMPO_DISABLE_CARDIO=1` requests breathing metrics only, to isolate cardio
   authorization or device-key failures. It is a diagnostic switch, not the
   default.
