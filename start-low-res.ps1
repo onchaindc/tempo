@@ -1,0 +1,1 @@
+$(cat /tmp/start-low-res.ps1)
